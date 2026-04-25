@@ -1,0 +1,21 @@
+# .NET build output
+bin/
+obj/
+
+# Built installer artifact (distribute via GitHub Releases instead)
+installer/HandMirrorSetup.exe
+installer/Output/
+
+# IDE / editor
+.vs/
+.vscode/
+*.suo
+*.user
+*.userprefs
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Claude Code local state
+.claude/

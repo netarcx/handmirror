@@ -1,0 +1,58 @@
+<Window x:Class="HandMirror.MirrorWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Hand Mirror"
+        Width="640" Height="480"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        Topmost="True"
+        SnapsToDevicePixels="True"
+        UseLayoutRounding="True">
+    <Border Background="#0A0A0A" CornerRadius="14" BorderBrush="#333" BorderThickness="1">
+        <Border.Effect>
+            <DropShadowEffect BlurRadius="20" ShadowDepth="0" Opacity="0.5" Color="Black" />
+        </Border.Effect>
+        <Grid>
+            <Border CornerRadius="13">
+                <Border.Background>
+                    <ImageBrush x:Name="PreviewBrush" Stretch="Fill">
+                        <ImageBrush.RelativeTransform>
+                            <ScaleTransform ScaleX="-1" CenterX="0.5" CenterY="0.5" />
+                        </ImageBrush.RelativeTransform>
+                    </ImageBrush>
+                </Border.Background>
+            </Border>
+            <TextBlock x:Name="StatusText"
+                       Foreground="#CCC"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                       FontSize="14" Text="Starting camera…" />
+            <Button x:Name="CloseButton"
+                    Click="CloseButton_Click"
+                    HorizontalAlignment="Right" VerticalAlignment="Top"
+                    Margin="0,8,8,0"
+                    Width="28" Height="28"
+                    Cursor="Hand"
+                    ToolTip="Close"
+                    Focusable="False">
+                <Button.Template>
+                    <ControlTemplate TargetType="Button">
+                        <Grid>
+                            <Ellipse x:Name="Bg" Fill="#80000000" />
+                            <Path Stroke="White" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                  HorizontalAlignment="Center" VerticalAlignment="Center"
+                                  Data="M 0,0 L 10,10 M 10,0 L 0,10" />
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bg" Property="Fill" Value="#CCE53935" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Button.Template>
+            </Button>
+        </Grid>
+    </Border>
+</Window>
