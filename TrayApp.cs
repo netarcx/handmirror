@@ -1,6 +1,5 @@
 using System;
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.Windows.Forms;
 using WpfApp = System.Windows.Application;
 
@@ -36,7 +35,7 @@ public sealed class TrayApp : IDisposable
 
         _icon = new NotifyIcon
         {
-            Icon = BuildIcon(),
+            Icon = LoadIcon(),
             Visible = true,
             Text = "Hand Mirror",
             ContextMenuStrip = menu,
@@ -63,22 +62,11 @@ public sealed class TrayApp : IDisposable
         w.Activate();
     }
 
-    private static Icon BuildIcon()
+    private static Icon LoadIcon()
     {
-        var bmp = new Bitmap(32, 32);
-        using (var g = Graphics.FromImage(bmp))
-        {
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.Clear(Color.Transparent);
-            using var ring = new Pen(Color.White, 2.5f);
-            g.DrawEllipse(ring, 4, 4, 24, 24);
-            using var fill = new SolidBrush(Color.FromArgb(80, 200, 220, 255));
-            g.FillEllipse(fill, 6, 6, 20, 20);
-            using var glint = new SolidBrush(Color.FromArgb(220, 255, 255, 255));
-            g.FillEllipse(glint, 10, 10, 6, 4);
-        }
-        var hIcon = bmp.GetHicon();
-        return Icon.FromHandle(hIcon);
+        using var stream = typeof(TrayApp).Assembly.GetManifestResourceStream("icon.ico")
+            ?? throw new InvalidOperationException("Embedded icon.ico resource missing");
+        return new Icon(stream);
     }
 
     public void Dispose()

@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
@@ -19,6 +20,8 @@ public sealed class WebcamCapture : IDisposable
     private WriteableBitmap? _bitmap;
     private Dispatcher? _dispatcher;
     private byte[]? _scratch;
+    private int _updatePending;
+    private volatile bool _disposed;
 
     public event Action<WriteableBitmap>? FrameReady;
 
@@ -27,17 +30,32 @@ public sealed class WebcamCapture : IDisposable
         _dispatcher = uiDispatcher;
 
         var devices = await DeviceInformation.FindAllAsync(DeviceClass.VideoCapture);
+        if (_disposed) return;
         if (devices.Count == 0)
             throw new InvalidOperationException("No camera found");
 
-        _capture = new MediaCapture();
-        await _capture.InitializeAsync(new MediaCaptureInitializationSettings
+        var capture = new MediaCapture();
+        try
         {
-            VideoDeviceId = devices[0].Id,
-            StreamingCaptureMode = StreamingCaptureMode.Video,
-            MemoryPreference = MediaCaptureMemoryPreference.Cpu,
-            SharingMode = MediaCaptureSharingMode.ExclusiveControl,
-        });
+            await capture.InitializeAsync(new MediaCaptureInitializationSettings
+            {
+                VideoDeviceId = devices[0].Id,
+                StreamingCaptureMode = StreamingCaptureMode.Video,
+                MemoryPreference = MediaCaptureMemoryPreference.Cpu,
+                SharingMode = MediaCaptureSharingMode.SharedReadOnly,
+            });
+        }
+        catch
+        {
+            capture.Dispose();
+            throw;
+        }
+        if (_disposed)
+        {
+            capture.Dispose();
+            return;
+        }
+        _capture = capture;
 
         var source = _capture.FrameSources.Values.FirstOrDefault(s =>
                          s.Info.MediaStreamType == MediaStreamType.VideoPreview)
@@ -46,59 +64,94 @@ public sealed class WebcamCapture : IDisposable
         if (source == null)
             throw new InvalidOperationException("No video frame source");
 
-        _reader = await _capture.CreateFrameReaderAsync(source, MediaEncodingSubtypes.Bgra8);
+        var reader = await _capture.CreateFrameReaderAsync(source, MediaEncodingSubtypes.Bgra8);
+        if (_disposed)
+        {
+            reader.Dispose();
+            return;
+        }
+        _reader = reader;
         _reader.FrameArrived += OnFrameArrived;
         var status = await _reader.StartAsync();
+        if (_disposed) return;
         if (status != MediaFrameReaderStartStatus.Success)
             throw new InvalidOperationException("Frame reader failed to start: " + status);
     }
 
     private void OnFrameArrived(MediaFrameReader sender, MediaFrameArrivedEventArgs args)
     {
-        using var frameRef = sender.TryAcquireLatestFrame();
-        var bitmap = frameRef?.VideoMediaFrame?.SoftwareBitmap;
-        if (bitmap == null) return;
-
-        var converted = bitmap;
-        var ownsConverted = false;
-        if (bitmap.BitmapPixelFormat != BitmapPixelFormat.Bgra8 ||
-            bitmap.BitmapAlphaMode != BitmapAlphaMode.Premultiplied)
+        if (Interlocked.CompareExchange(ref _updatePending, 1, 0) != 0)
         {
-            converted = SoftwareBitmap.Convert(bitmap, BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied);
-            ownsConverted = true;
+            using var skipped = sender.TryAcquireLatestFrame();
+            return;
         }
 
-        int w = converted.PixelWidth;
-        int h = converted.PixelHeight;
-        int byteCount = w * h * 4;
-
-        if (_scratch == null || _scratch.Length != byteCount)
-            _scratch = new byte[byteCount];
-
-        var buffer = new Windows.Storage.Streams.Buffer((uint)byteCount);
-        converted.CopyToBuffer(buffer);
-        using (var reader = DataReader.FromBuffer(buffer))
+        bool dispatched = false;
+        try
         {
-            reader.ReadBytes(_scratch);
-        }
+            using var frameRef = sender.TryAcquireLatestFrame();
+            var bitmap = frameRef?.VideoMediaFrame?.SoftwareBitmap;
+            if (bitmap == null) return;
 
-        if (ownsConverted) converted.Dispose();
-
-        var bytes = _scratch;
-        _dispatcher?.BeginInvoke(() =>
-        {
-            if (_bitmap == null || _bitmap.PixelWidth != w || _bitmap.PixelHeight != h)
+            var converted = bitmap;
+            var ownsConverted = false;
+            if (bitmap.BitmapPixelFormat != BitmapPixelFormat.Bgra8 ||
+                bitmap.BitmapAlphaMode != BitmapAlphaMode.Premultiplied)
             {
-                _bitmap = new WriteableBitmap(w, h, 96, 96,
-                    System.Windows.Media.PixelFormats.Pbgra32, null);
+                converted = SoftwareBitmap.Convert(bitmap, BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied);
+                ownsConverted = true;
             }
-            _bitmap.WritePixels(new System.Windows.Int32Rect(0, 0, w, h), bytes, w * 4, 0);
-            FrameReady?.Invoke(_bitmap);
-        });
+
+            int w = converted.PixelWidth;
+            int h = converted.PixelHeight;
+            int byteCount = w * h * 4;
+
+            if (_scratch == null || _scratch.Length != byteCount)
+                _scratch = new byte[byteCount];
+
+            var buffer = new Windows.Storage.Streams.Buffer((uint)byteCount);
+            converted.CopyToBuffer(buffer);
+            using (var reader = DataReader.FromBuffer(buffer))
+            {
+                reader.ReadBytes(_scratch);
+            }
+
+            if (ownsConverted) converted.Dispose();
+
+            var bytes = _scratch;
+            var dispatcher = _dispatcher;
+            if (dispatcher == null) return;
+
+            dispatcher.BeginInvoke(() =>
+            {
+                try
+                {
+                    if (_disposed) return;
+                    if (_bitmap == null || _bitmap.PixelWidth != w || _bitmap.PixelHeight != h)
+                    {
+                        _bitmap = new WriteableBitmap(w, h, 96, 96,
+                            System.Windows.Media.PixelFormats.Pbgra32, null);
+                    }
+                    _bitmap.WritePixels(new System.Windows.Int32Rect(0, 0, w, h), bytes, w * 4, 0);
+                    FrameReady?.Invoke(_bitmap);
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _updatePending, 0);
+                }
+            });
+            dispatched = true;
+        }
+        finally
+        {
+            if (!dispatched)
+                Interlocked.Exchange(ref _updatePending, 0);
+        }
     }
 
     public void Dispose()
     {
+        _disposed = true;
         try
         {
             if (_reader != null)

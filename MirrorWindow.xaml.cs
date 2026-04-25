@@ -2,6 +2,7 @@ using System;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Media;
 
 namespace HandMirror;
 
@@ -15,7 +16,25 @@ public partial class MirrorWindow : Window
         InitializeComponent();
         PositionAtTopCenter();
         Loaded += async (_, _) => await StartAsync();
-        MouseLeftButtonDown += (_, _) => DragMove();
+        MouseLeftButtonDown += OnWindowMouseLeftButtonDown;
+    }
+
+    private void OnWindowMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.OriginalSource is DependencyObject src && IsDescendantOf(src, CloseButton))
+            return;
+        if (e.LeftButton == MouseButtonState.Pressed)
+            DragMove();
+    }
+
+    private static bool IsDescendantOf(DependencyObject? node, DependencyObject ancestor)
+    {
+        while (node != null)
+        {
+            if (ReferenceEquals(node, ancestor)) return true;
+            node = VisualTreeHelper.GetParent(node);
+        }
+        return false;
     }
 
     private void PositionAtTopCenter()
