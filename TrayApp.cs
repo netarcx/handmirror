@@ -9,8 +9,13 @@ public sealed class TrayApp : IDisposable
 {
     private readonly NotifyIcon _icon;
     private readonly ToolStripMenuItem _cameraMenu;
+    private readonly ToolStripMenuItem _updateItem;
+    private readonly System.Windows.Forms.Timer _updateTimer;
     private MirrorWindow? _window;
     private string _cameraMenuSignature = "";
+    private UpdateService.UpdateInfo? _pendingUpdate;
+    private Version? _notifiedVersion;
+    private bool _installing;
 
     public TrayApp()
     {
@@ -31,12 +36,14 @@ public sealed class TrayApp : IDisposable
         };
 
         _cameraMenu = new ToolStripMenuItem("Camera");
+        _updateItem = new ToolStripMenuItem("Check for updates…", null, (_, _) => OnUpdateItemClicked());
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("Show / Hide", null, (_, _) => Toggle());
         menu.Items.Add(_cameraMenu);
         menu.Items.Add(startupItem);
         menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(_updateItem);
         menu.Items.Add("Exit", null, (_, _) => WpfApp.Current.Shutdown());
 
         // Refresh the camera list each time the menu opens, so newly plugged-in
@@ -54,8 +61,88 @@ public sealed class TrayApp : IDisposable
         {
             if (e.Button == MouseButtons.Left) Toggle();
         };
+        _icon.BalloonTipClicked += (_, _) =>
+        {
+            if (_pendingUpdate != null) _ = InstallUpdateAsync(_pendingUpdate);
+        };
 
         _ = PopulateCamerasAsync();
+
+        // Check for updates on launch, then on a recurring timer. The timer ticks on
+        // the UI thread, so the async continuations are UI-thread safe.
+        _updateTimer = new System.Windows.Forms.Timer { Interval = 30 * 60 * 1000 };
+        _updateTimer.Tick += (_, _) => _ = CheckForUpdatesAsync(announce: true);
+        _updateTimer.Start();
+        _ = CheckForUpdatesAsync(announce: true);
+    }
+
+    private async Task CheckForUpdatesAsync(bool announce)
+    {
+        if (_installing) return;
+
+        var info = await UpdateService.CheckAsync();
+        if (info == null)
+        {
+            _pendingUpdate = null;
+            _updateItem.Text = "Check for updates…";
+            return;
+        }
+
+        _pendingUpdate = info;
+        _updateItem.Text = $"Install update {info.Version}…";
+
+        // Only pop the balloon once per discovered version, so the recurring check
+        // doesn't nag every 30 minutes.
+        if (announce && info.Version != _notifiedVersion)
+        {
+            _notifiedVersion = info.Version;
+            _icon.ShowBalloonTip(7000, "Hand Mirror update available",
+                $"Version {info.Version} is ready. Click here to install.", ToolTipIcon.Info);
+        }
+    }
+
+    private async void OnUpdateItemClicked()
+    {
+        if (_installing) return;
+
+        if (_pendingUpdate != null)
+        {
+            await InstallUpdateAsync(_pendingUpdate);
+            return;
+        }
+
+        _updateItem.Text = "Checking…";
+        _updateItem.Enabled = false;
+        await CheckForUpdatesAsync(announce: false);
+        _updateItem.Enabled = true;
+        if (_pendingUpdate == null)
+            _updateItem.Text = $"Up to date ({UpdateService.CurrentVersion})";
+    }
+
+    private async Task InstallUpdateAsync(UpdateService.UpdateInfo info)
+    {
+        if (_installing) return;
+        _installing = true;
+        _updateItem.Enabled = false;
+        _updateItem.Text = $"Downloading {info.Version}…";
+
+        string installerPath;
+        try
+        {
+            installerPath = await UpdateService.DownloadAsync(info);
+        }
+        catch (Exception ex)
+        {
+            _installing = false;
+            _updateItem.Enabled = true;
+            _updateItem.Text = $"Install update {info.Version}…";
+            _icon.ShowBalloonTip(7000, "Update failed",
+                "Could not download the update: " + ex.Message, ToolTipIcon.Error);
+            return;
+        }
+
+        // Runs the silent installer and shuts us down; the installer relaunches us.
+        UpdateService.ApplyAndRestart(installerPath);
     }
 
     private async Task PopulateCamerasAsync()
@@ -140,6 +227,8 @@ public sealed class TrayApp : IDisposable
 
     public void Dispose()
     {
+        _updateTimer.Stop();
+        _updateTimer.Dispose();
         _icon.Visible = false;
         _icon.Dispose();
         _window?.Close();
