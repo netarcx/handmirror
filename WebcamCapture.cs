@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Media.Imaging;
@@ -9,9 +10,17 @@ using Windows.Graphics.Imaging;
 using Windows.Media.Capture;
 using Windows.Media.Capture.Frames;
 using Windows.Media.MediaProperties;
-using Windows.Storage.Streams;
 
 namespace HandMirror;
+
+// Lets us read the raw bytes (and the real row stride) of a WinRT BitmapBuffer.
+[ComImport]
+[Guid("5B0D3235-4DBA-4D44-865E-8F1D0E4FD04D")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal unsafe interface IMemoryBufferByteAccess
+{
+    void GetBuffer(out byte* buffer, out uint capacity);
+}
 
 public sealed class WebcamCapture : IDisposable
 {
@@ -195,16 +204,34 @@ public sealed class WebcamCapture : IDisposable
 
             int w = converted.PixelWidth;
             int h = converted.PixelHeight;
-            int byteCount = w * h * 4;
+            int rowBytes = w * 4;
+            int byteCount = rowBytes * h;
 
             if (_scratch == null || _scratch.Length != byteCount)
                 _scratch = new byte[byteCount];
 
-            var buffer = new Windows.Storage.Streams.Buffer((uint)byteCount);
-            converted.CopyToBuffer(buffer);
-            using (var reader = DataReader.FromBuffer(buffer))
+            // Copy out the pixels honoring the bitmap's REAL row stride. MediaFoundation
+            // pads each row for alignment, so the source stride is usually larger than
+            // w*4. Assuming w*4 shifts every row and produces green/magenta diagonal
+            // tearing — so we read plane.Stride and repack tightly into _scratch.
+            using (var locked = converted.LockBuffer(BitmapBufferAccessMode.Read))
+            using (var reference = locked.CreateReference())
             {
-                reader.ReadBytes(_scratch);
+                var plane = locked.GetPlaneDescription(0);
+                int srcStride = plane.Stride;
+                unsafe
+                {
+                    ((IMemoryBufferByteAccess)reference).GetBuffer(out byte* src, out uint capacity);
+                    byte* start = src + plane.StartIndex;
+                    fixed (byte* dst = _scratch)
+                    {
+                        for (int y = 0; y < h; y++)
+                            System.Buffer.MemoryCopy(
+                                start + (long)y * srcStride,
+                                dst + (long)y * rowBytes,
+                                rowBytes, rowBytes);
+                    }
+                }
             }
 
             if (ownsConverted) converted.Dispose();
