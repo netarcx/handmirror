@@ -29,6 +29,11 @@
                        Foreground="#CCC"
                        HorizontalAlignment="Center" VerticalAlignment="Center"
                        FontSize="14" Text="Starting camera…" />
+            <TextBlock x:Name="DiagText"
+                       Foreground="#9AFF9A" Background="#88000000"
+                       HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                       Margin="6" Padding="4,2" FontSize="10" FontFamily="Consolas"
+                       TextWrapping="Wrap" Visibility="Collapsed" />
             <Button x:Name="CloseButton"
                     Click="CloseButton_Click"
                     HorizontalAlignment="Right" VerticalAlignment="Top"

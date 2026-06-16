@@ -58,6 +58,11 @@ public partial class MirrorWindow : Window
                 PositionAtTopCenter();
             }
         };
+        _capture.DiagnosticsReady += info =>
+        {
+            DiagText.Text = info;
+            DiagText.Visibility = Visibility.Visible;
+        };
         _capture.CaptureFailed += message =>
         {
             var text = "Camera error: " + message +

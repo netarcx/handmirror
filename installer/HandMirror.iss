@@ -3,7 +3,7 @@
 #define MyAppName "Hand Mirror"
 ; Version can be overridden from the build: ISCC /DMyAppVersion=1.2.3
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.4"
+  #define MyAppVersion "1.0.5"
 #endif
 #define MyAppExeName "HandMirror.exe"
 #define MyAppId "{8F8E5B6E-6A3F-4A1D-9C2A-3E5F1B2A0C7D}"

@@ -25,6 +25,11 @@ public sealed class WebcamCapture : IDisposable
 
     public event Action<WriteableBitmap>? FrameReady;
     public event Action<string>? CaptureFailed;
+    public event Action<string>? DiagnosticsReady;
+
+    private string _negotiatedSubtype = "native";
+    private string _sourceSubtype = "?";
+    private int _diagSent;
 
     public sealed record CameraInfo(string Id, string Name);
 
@@ -98,6 +103,7 @@ public sealed class WebcamCapture : IDisposable
             reader.Dispose();
             return;
         }
+        _sourceSubtype = source.CurrentFormat?.Subtype ?? "?";
         _reader = reader;
         _reader.FrameArrived += OnFrameArrived;
         var status = await _reader.StartAsync();
@@ -120,26 +126,42 @@ public sealed class WebcamCapture : IDisposable
     }
 
     // Create a frame reader, trying several output subtypes. Forcing BGRA8 directly
-    // fails on many cameras and on MJPG-only capture cards (MF_E_INVALIDMEDIATYPE);
-    // requesting NV12 lets MediaFoundation decode MJPG/YUY2 for us. OnFrameArrived
-    // then converts whatever arrives to BGRA8 in software.
-    private static async Task<MediaFrameReader?> CreateReaderAsync(MediaCapture capture, MediaFrameSource source)
+    // fails on many cameras and on MJPG-only capture cards (MF_E_INVALIDMEDIATYPE).
+    // We prefer BGRA8 (MF does the full color conversion) then 4:2:2 YUY2, and only
+    // fall back to 4:2:0 NV12 last — NV12's vertically-subsampled chroma is what
+    // produces the green/magenta luma-chroma split on some hardware.
+    private async Task<MediaFrameReader?> CreateReaderAsync(MediaCapture capture, MediaFrameSource source)
     {
         var current = source.CurrentFormat;
         bool nativeUsable = current != null
             && UncompressedSubtypes.Contains(current.Subtype.ToUpperInvariant());
 
+        // (label, subtype) pairs; null subtype = the source's native format.
         var strategies = nativeUsable
-            ? new string?[] { null, MediaEncodingSubtypes.Nv12, MediaEncodingSubtypes.Bgra8 }
-            : new string?[] { MediaEncodingSubtypes.Nv12, MediaEncodingSubtypes.Yuy2, MediaEncodingSubtypes.Bgra8, null };
+            ? new (string Label, string? Subtype)[]
+              {
+                  ("native", null),
+                  ("Bgra8", MediaEncodingSubtypes.Bgra8),
+                  ("Yuy2", MediaEncodingSubtypes.Yuy2),
+                  ("Nv12", MediaEncodingSubtypes.Nv12),
+              }
+            : new (string Label, string? Subtype)[]
+              {
+                  ("Bgra8", MediaEncodingSubtypes.Bgra8),
+                  ("Yuy2", MediaEncodingSubtypes.Yuy2),
+                  ("Nv12", MediaEncodingSubtypes.Nv12),
+                  ("native", null),
+              };
 
-        foreach (var subtype in strategies)
+        foreach (var (label, subtype) in strategies)
         {
             try
             {
-                return subtype == null
+                var reader = subtype == null
                     ? await capture.CreateFrameReaderAsync(source)
                     : await capture.CreateFrameReaderAsync(source, subtype);
+                _negotiatedSubtype = label;
+                return reader;
             }
             catch
             {
@@ -156,14 +178,26 @@ public sealed class WebcamCapture : IDisposable
         "NV12", "YUY2", "UYVY", "YV12", "IYUV", "I420", "RGB24", "RGB32", "ARGB32", "BGRA8",
     };
 
+    // Lower rank = preferred. RGB needs no chroma reconstruction; 4:2:2 (YUY2/UYVY)
+    // keeps full vertical chroma; 4:2:0 (NV12/YV12) is most prone to the green/magenta
+    // luma-chroma misalignment, so it's last.
+    private static int SubtypeRank(string subtype) => subtype.ToUpperInvariant() switch
+    {
+        "RGB32" or "ARGB32" or "BGRA8" => 0,
+        "RGB24" => 1,
+        "YUY2" or "UYVY" => 2,
+        _ => 3,
+    };
+
     private static MediaFrameFormat? PickFormat(MediaFrameSource source)
     {
-        const long target = 1280L * 720; // prefer ~720p, then the highest frame rate
+        const long target = 1280L * 720; // aim for ~720p
 
         return source.SupportedFormats
             .Where(f => string.Equals(f.MajorType, "Video", StringComparison.OrdinalIgnoreCase)
                         && UncompressedSubtypes.Contains(f.Subtype.ToUpperInvariant()))
-            .OrderBy(f => Math.Abs((long)f.VideoFormat.Width * f.VideoFormat.Height - target))
+            .OrderBy(f => SubtypeRank(f.Subtype))                                  // color fidelity first
+            .ThenBy(f => Math.Abs((long)f.VideoFormat.Width * f.VideoFormat.Height - target))
             .ThenByDescending(f => f.FrameRate.Denominator == 0
                 ? 0d
                 : f.FrameRate.Numerator / (double)f.FrameRate.Denominator)
@@ -185,6 +219,7 @@ public sealed class WebcamCapture : IDisposable
             var bitmap = frameRef?.VideoMediaFrame?.SoftwareBitmap;
             if (bitmap == null) return;
 
+            var incomingFormat = bitmap.BitmapPixelFormat;
             var converted = bitmap;
             var ownsConverted = false;
             if (bitmap.BitmapPixelFormat != BitmapPixelFormat.Bgra8 ||
@@ -231,6 +266,14 @@ public sealed class WebcamCapture : IDisposable
             var bytes = _scratch;
             var dispatcher = _dispatcher;
             if (dispatcher == null) return;
+
+            // One-shot diagnostic so we can see the actual negotiated format on screen.
+            if (Interlocked.Exchange(ref _diagSent, 1) == 0)
+            {
+                var diag = $"reader={_negotiatedSubtype}  src={_sourceSubtype}  " +
+                           $"in={incomingFormat}  {w}x{h}  stride={stride}";
+                dispatcher.BeginInvoke(() => DiagnosticsReady?.Invoke(diag));
+            }
 
             dispatcher.BeginInvoke(() =>
             {
@@ -296,5 +339,6 @@ public sealed class WebcamCapture : IDisposable
         _dispatcher = null;
         FrameReady = null;
         CaptureFailed = null;
+        DiagnosticsReady = null;
     }
 }
