@@ -64,7 +64,21 @@ public sealed class WebcamCapture : IDisposable
         if (source == null)
             throw new InvalidOperationException("No video frame source");
 
-        var reader = await _capture.CreateFrameReaderAsync(source, MediaEncodingSubtypes.Bgra8);
+        // Most webcams only deliver NV12/YUY2/MJPG natively, not BGRA8. Asking the
+        // frame reader to output BGRA8 directly fails with MF_E_INVALIDMEDIATYPE
+        // ("data specified for the media type is invalid...") when MediaFoundation
+        // can't build a converter for that device. Instead, switch the source to a
+        // supported uncompressed format and let OnFrameArrived convert to BGRA8 in
+        // software (which it already does for any input format).
+        var format = PickFormat(source);
+        if (format != null)
+        {
+            try { await source.SetFormatAsync(format); }
+            catch { /* keep the source's current format as a fallback */ }
+            if (_disposed) return;
+        }
+
+        var reader = await _capture.CreateFrameReaderAsync(source);
         if (_disposed)
         {
             reader.Dispose();
@@ -76,6 +90,27 @@ public sealed class WebcamCapture : IDisposable
         if (_disposed) return;
         if (status != MediaFrameReaderStartStatus.Success)
             throw new InvalidOperationException("Frame reader failed to start: " + status);
+    }
+
+    // Uncompressed subtypes whose frames expose a usable SoftwareBitmap on the CPU.
+    // Compressed formats (MJPG/H264/HEVC) yield no SoftwareBitmap, so we avoid them.
+    private static readonly string[] UncompressedSubtypes =
+    {
+        "NV12", "YUY2", "UYVY", "YV12", "IYUV", "I420", "RGB24", "RGB32", "ARGB32", "BGRA8",
+    };
+
+    private static MediaFrameFormat? PickFormat(MediaFrameSource source)
+    {
+        const long target = 1280L * 720; // prefer ~720p, then the highest frame rate
+
+        return source.SupportedFormats
+            .Where(f => string.Equals(f.MajorType, "Video", StringComparison.OrdinalIgnoreCase)
+                        && UncompressedSubtypes.Contains(f.Subtype.ToUpperInvariant()))
+            .OrderBy(f => Math.Abs((long)f.VideoFormat.Width * f.VideoFormat.Height - target))
+            .ThenByDescending(f => f.FrameRate.Denominator == 0
+                ? 0d
+                : f.FrameRate.Numerator / (double)f.FrameRate.Denominator)
+            .FirstOrDefault();
     }
 
     private void OnFrameArrived(MediaFrameReader sender, MediaFrameArrivedEventArgs args)
