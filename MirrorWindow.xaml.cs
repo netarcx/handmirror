@@ -60,11 +60,12 @@ public partial class MirrorWindow : Window
         };
         try
         {
-            await _capture.StartAsync(Dispatcher);
+            await _capture.StartAsync(Dispatcher, Settings.CameraId);
         }
         catch (Exception ex)
         {
-            StatusText.Text = "Camera error: " + ex.Message;
+            StatusText.Text = "Camera error: " + ex.Message +
+                "\nPick a different camera from the tray icon's Camera menu.";
         }
     }
 

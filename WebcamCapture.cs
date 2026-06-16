@@ -25,7 +25,21 @@ public sealed class WebcamCapture : IDisposable
 
     public event Action<WriteableBitmap>? FrameReady;
 
-    public async Task StartAsync(Dispatcher uiDispatcher)
+    public sealed record CameraInfo(string Id, string Name);
+
+    /// <summary>Lists connected video capture devices (webcams, capture cards, etc.).</summary>
+    public static async Task<IReadOnlyList<CameraInfo>> ListCamerasAsync()
+    {
+        var devices = await DeviceInformation.FindAllAsync(DeviceClass.VideoCapture);
+        return devices.Select(d => new CameraInfo(d.Id, d.Name)).ToList();
+    }
+
+    /// <summary>
+    /// Starts capture from the given device (or the first available one). Pass the
+    /// id from <see cref="ListCamerasAsync"/> to pick a specific camera — important
+    /// when several video-in devices exist (e.g. a webcam plus an HDMI capture card).
+    /// </summary>
+    public async Task StartAsync(Dispatcher uiDispatcher, string? deviceId = null)
     {
         _dispatcher = uiDispatcher;
 
@@ -34,21 +48,23 @@ public sealed class WebcamCapture : IDisposable
         if (devices.Count == 0)
             throw new InvalidOperationException("No camera found");
 
+        var device = devices.FirstOrDefault(d => d.Id == deviceId) ?? devices[0];
+
         var capture = new MediaCapture();
         try
         {
             await capture.InitializeAsync(new MediaCaptureInitializationSettings
             {
-                VideoDeviceId = devices[0].Id,
+                VideoDeviceId = device.Id,
                 StreamingCaptureMode = StreamingCaptureMode.Video,
                 MemoryPreference = MediaCaptureMemoryPreference.Cpu,
                 SharingMode = MediaCaptureSharingMode.SharedReadOnly,
             });
         }
-        catch
+        catch (Exception ex)
         {
             capture.Dispose();
-            throw;
+            throw new InvalidOperationException($"Could not open '{device.Name}': {ex.Message}", ex);
         }
         if (_disposed)
         {
@@ -57,28 +73,25 @@ public sealed class WebcamCapture : IDisposable
         }
         _capture = capture;
 
-        var source = _capture.FrameSources.Values.FirstOrDefault(s =>
-                         s.Info.MediaStreamType == MediaStreamType.VideoPreview)
-                     ?? _capture.FrameSources.Values.FirstOrDefault(s =>
-                         s.Info.MediaStreamType == MediaStreamType.VideoRecord);
+        var source = PickSource(_capture);
         if (source == null)
-            throw new InvalidOperationException("No video frame source");
+            throw new InvalidOperationException($"'{device.Name}' exposes no usable video stream");
 
-        // Most webcams only deliver NV12/YUY2/MJPG natively, not BGRA8. Asking the
-        // frame reader to output BGRA8 directly fails with MF_E_INVALIDMEDIATYPE
-        // ("data specified for the media type is invalid...") when MediaFoundation
-        // can't build a converter for that device. Instead, switch the source to a
-        // supported uncompressed format and let OnFrameArrived convert to BGRA8 in
-        // software (which it already does for any input format).
+        // Best-effort: switch the source to an uncompressed format. Ignored in shared
+        // mode or on devices that don't allow it — the reader fallback below still copes.
         var format = PickFormat(source);
         if (format != null)
         {
             try { await source.SetFormatAsync(format); }
-            catch { /* keep the source's current format as a fallback */ }
+            catch { /* keep the source's current format */ }
             if (_disposed) return;
         }
 
-        var reader = await _capture.CreateFrameReaderAsync(source);
+        var reader = await CreateReaderAsync(_capture, source);
+        if (reader == null)
+            throw new InvalidOperationException(
+                $"'{device.Name}' did not accept any supported frame format. " +
+                "If this is an HDMI capture card, make sure a source is connected.");
         if (_disposed)
         {
             reader.Dispose();
@@ -90,6 +103,49 @@ public sealed class WebcamCapture : IDisposable
         if (_disposed) return;
         if (status != MediaFrameReaderStartStatus.Success)
             throw new InvalidOperationException("Frame reader failed to start: " + status);
+    }
+
+    // Prefer a real color source over Infrared/Depth, and a preview stream over record.
+    private static MediaFrameSource? PickSource(MediaCapture capture)
+    {
+        var color = capture.FrameSources.Values
+            .Where(s => s.Info.SourceKind == MediaFrameSourceKind.Color)
+            .ToList();
+        var pool = color.Count > 0 ? color : capture.FrameSources.Values.ToList();
+
+        return pool.FirstOrDefault(s => s.Info.MediaStreamType == MediaStreamType.VideoPreview)
+               ?? pool.FirstOrDefault(s => s.Info.MediaStreamType == MediaStreamType.VideoRecord)
+               ?? pool.FirstOrDefault();
+    }
+
+    // Create a frame reader, trying several output subtypes. Forcing BGRA8 directly
+    // fails on many cameras and on MJPG-only capture cards (MF_E_INVALIDMEDIATYPE);
+    // requesting NV12 lets MediaFoundation decode MJPG/YUY2 for us. OnFrameArrived
+    // then converts whatever arrives to BGRA8 in software.
+    private static async Task<MediaFrameReader?> CreateReaderAsync(MediaCapture capture, MediaFrameSource source)
+    {
+        var current = source.CurrentFormat;
+        bool nativeUsable = current != null
+            && UncompressedSubtypes.Contains(current.Subtype.ToUpperInvariant());
+
+        var strategies = nativeUsable
+            ? new string?[] { null, MediaEncodingSubtypes.Nv12, MediaEncodingSubtypes.Bgra8 }
+            : new string?[] { MediaEncodingSubtypes.Nv12, MediaEncodingSubtypes.Yuy2, MediaEncodingSubtypes.Bgra8, null };
+
+        foreach (var subtype in strategies)
+        {
+            try
+            {
+                return subtype == null
+                    ? await capture.CreateFrameReaderAsync(source)
+                    : await capture.CreateFrameReaderAsync(source, subtype);
+            }
+            catch
+            {
+                // This subtype isn't supported by the device — try the next one.
+            }
+        }
+        return null;
     }
 
     // Uncompressed subtypes whose frames expose a usable SoftwareBitmap on the CPU.
