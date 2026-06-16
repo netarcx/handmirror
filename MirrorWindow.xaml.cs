@@ -58,6 +58,15 @@ public partial class MirrorWindow : Window
                 PositionAtTopCenter();
             }
         };
+        _capture.CaptureFailed += message =>
+        {
+            var text = "Camera error: " + message +
+                "\nTry another camera from the tray icon's Camera menu.";
+            if (StatusText.Text == text && StatusText.Visibility == Visibility.Visible)
+                return; // avoid re-laying out the UI on every failing frame
+            StatusText.Visibility = Visibility.Visible;
+            StatusText.Text = text;
+        };
         try
         {
             await _capture.StartAsync(Dispatcher, Settings.CameraId);

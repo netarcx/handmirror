@@ -17,23 +17,67 @@ public static class StartupRegistration
 
     public static bool IsEnabled()
     {
-        using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath);
-        return key?.GetValue(ValueName) is string s && !string.IsNullOrWhiteSpace(s);
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath);
+            return key?.GetValue(ValueName) is string s && !string.IsNullOrWhiteSpace(s);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public static void Enable()
     {
-        var path = Environment.ProcessPath;
-        if (string.IsNullOrEmpty(path)) return;
-        if (!IsRunningFromStableExe()) return;
-        using var key = Registry.CurrentUser.CreateSubKey(RunKeyPath, writable: true)
-                        ?? throw new InvalidOperationException("Could not open Run key");
-        key.SetValue(ValueName, $"\"{path}\"");
+        try
+        {
+            var path = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(path)) return;
+            if (!IsRunningFromStableExe()) return;
+            using var key = Registry.CurrentUser.CreateSubKey(RunKeyPath, writable: true);
+            key?.SetValue(ValueName, $"\"{path}\"");
+        }
+        catch
+        {
+            // Registry may be policy-restricted; startup is a nice-to-have, not fatal.
+        }
     }
 
     public static void Disable()
     {
-        using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true);
-        key?.DeleteValue(ValueName, throwOnMissingValue: false);
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true);
+            key?.DeleteValue(ValueName, throwOnMissingValue: false);
+        }
+        catch
+        {
+        }
+    }
+
+    /// <summary>
+    /// If startup is enabled but the stored path is stale (e.g. after an upgrade or
+    /// move), rewrite it to the current exe. Does nothing if startup is disabled, so
+    /// it won't re-enable something the user turned off.
+    /// </summary>
+    public static void RefreshIfEnabled()
+    {
+        try
+        {
+            if (!IsRunningFromStableExe()) return;
+            var path = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(path)) return;
+            using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true);
+            if (key?.GetValue(ValueName) is string existing && !string.IsNullOrWhiteSpace(existing))
+            {
+                var desired = $"\"{path}\"";
+                if (!string.Equals(existing, desired, StringComparison.OrdinalIgnoreCase))
+                    key.SetValue(ValueName, desired);
+            }
+        }
+        catch
+        {
+        }
     }
 }

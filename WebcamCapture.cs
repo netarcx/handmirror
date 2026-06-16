@@ -1,6 +1,5 @@
 using System;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Media.Imaging;
@@ -10,17 +9,9 @@ using Windows.Graphics.Imaging;
 using Windows.Media.Capture;
 using Windows.Media.Capture.Frames;
 using Windows.Media.MediaProperties;
+using Windows.Storage.Streams;
 
 namespace HandMirror;
-
-// Lets us read the raw bytes (and the real row stride) of a WinRT BitmapBuffer.
-[ComImport]
-[Guid("5B0D3235-4DBA-4D44-865E-8F1D0E4FD04D")]
-[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-internal unsafe interface IMemoryBufferByteAccess
-{
-    void GetBuffer(out byte* buffer, out uint capacity);
-}
 
 public sealed class WebcamCapture : IDisposable
 {
@@ -33,6 +24,7 @@ public sealed class WebcamCapture : IDisposable
     private volatile bool _disposed;
 
     public event Action<WriteableBitmap>? FrameReady;
+    public event Action<string>? CaptureFailed;
 
     public sealed record CameraInfo(string Id, string Name);
 
@@ -204,37 +196,37 @@ public sealed class WebcamCapture : IDisposable
 
             int w = converted.PixelWidth;
             int h = converted.PixelHeight;
-            int rowBytes = w * 4;
-            int byteCount = rowBytes * h;
+            if (w <= 0 || h <= 0) return;
 
-            if (_scratch == null || _scratch.Length != byteCount)
-                _scratch = new byte[byteCount];
-
-            // Copy out the pixels honoring the bitmap's REAL row stride. MediaFoundation
-            // pads each row for alignment, so the source stride is usually larger than
-            // w*4. Assuming w*4 shifts every row and produces green/magenta diagonal
-            // tearing — so we read plane.Stride and repack tightly into _scratch.
-            using (var locked = converted.LockBuffer(BitmapBufferAccessMode.Read))
-            using (var reference = locked.CreateReference())
+            // MediaFoundation pads each row for alignment, so the real stride is usually
+            // larger than w*4. Assuming w*4 shifts every row and gives green/magenta
+            // diagonal tearing; under-sizing the copy buffer (the previous bug) does the
+            // same. So: probe the real stride to size the buffer generously, let
+            // CopyToBuffer write its natural layout, then read back EXACTLY what it wrote
+            // and derive the stride from that byte count. This never over-reads, so it
+            // can't throw regardless of whether CopyToBuffer packs or pads.
+            int probeStride = w * 4;
+            try
             {
-                var plane = locked.GetPlaneDescription(0);
-                int srcStride = plane.Stride;
-                unsafe
-                {
-                    ((IMemoryBufferByteAccess)reference).GetBuffer(out byte* src, out uint capacity);
-                    byte* start = src + plane.StartIndex;
-                    fixed (byte* dst = _scratch)
-                    {
-                        for (int y = 0; y < h; y++)
-                            System.Buffer.MemoryCopy(
-                                start + (long)y * srcStride,
-                                dst + (long)y * rowBytes,
-                                rowBytes, rowBytes);
-                    }
-                }
+                using var locked = converted.LockBuffer(BitmapBufferAccessMode.Read);
+                probeStride = Math.Max(probeStride, locked.GetPlaneDescription(0).Stride);
             }
+            catch { /* fall back to w*4 */ }
 
+            var buffer = new Windows.Storage.Streams.Buffer((uint)(probeStride * h));
+            converted.CopyToBuffer(buffer);
             if (ownsConverted) converted.Dispose();
+
+            int stride;
+            using (var dataReader = DataReader.FromBuffer(buffer))
+            {
+                int copied = (int)dataReader.UnconsumedBufferLength;
+                if (copied < w * 4 * h) return; // incomplete frame; skip it
+                stride = copied / h;
+                if (_scratch == null || _scratch.Length != copied)
+                    _scratch = new byte[copied];
+                dataReader.ReadBytes(_scratch);
+            }
 
             var bytes = _scratch;
             var dispatcher = _dispatcher;
@@ -250,7 +242,7 @@ public sealed class WebcamCapture : IDisposable
                         _bitmap = new WriteableBitmap(w, h, 96, 96,
                             System.Windows.Media.PixelFormats.Pbgra32, null);
                     }
-                    _bitmap.WritePixels(new System.Windows.Int32Rect(0, 0, w, h), bytes, w * 4, 0);
+                    _bitmap.WritePixels(new System.Windows.Int32Rect(0, 0, w, h), bytes, stride, 0);
                     FrameReady?.Invoke(_bitmap);
                 }
                 finally
@@ -259,6 +251,14 @@ public sealed class WebcamCapture : IDisposable
                 }
             });
             dispatched = true;
+        }
+        catch (Exception ex)
+        {
+            // Surface a per-frame failure instead of silently stalling on "Starting…".
+            var dispatcher = _dispatcher;
+            var message = ex.Message;
+            if (dispatcher != null && !_disposed)
+                dispatcher.BeginInvoke(() => CaptureFailed?.Invoke(message));
         }
         finally
         {
@@ -270,18 +270,31 @@ public sealed class WebcamCapture : IDisposable
     public void Dispose()
     {
         _disposed = true;
+
+        var reader = _reader;
+        var capture = _capture;
+        _reader = null;
+        _capture = null;
+
         try
         {
-            if (_reader != null)
+            if (reader != null)
             {
-                _reader.FrameArrived -= OnFrameArrived;
-                _reader.StopAsync().AsTask().Wait();
-                _reader.Dispose();
-                _reader = null;
+                reader.FrameArrived -= OnFrameArrived;
+                // Stop on a thread-pool thread (no UI SynchronizationContext) so the
+                // StopAsync continuation can't deadlock against the UI thread we're on.
+                // Bounded wait so the camera/LED is released before we tear down.
+                Task.Run(async () => await reader.StopAsync()).Wait(TimeSpan.FromSeconds(2));
+                reader.Dispose();
             }
         }
         catch { }
-        try { _capture?.Dispose(); } catch { }
-        _capture = null;
+        try { capture?.Dispose(); } catch { }
+
+        _scratch = null;
+        _bitmap = null;
+        _dispatcher = null;
+        FrameReady = null;
+        CaptureFailed = null;
     }
 }
