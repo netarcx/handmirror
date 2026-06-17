@@ -8,7 +8,7 @@ namespace HandMirror;
 
 public partial class MirrorWindow : Window
 {
-    private readonly WebcamCapture _capture = new();
+    private WebcamCapture _capture = new();
     private bool _sizedToFrame;
 
     public MirrorWindow()
@@ -17,6 +17,26 @@ public partial class MirrorWindow : Window
         PositionAtTopCenter();
         Loaded += async (_, _) => await StartAsync();
         MouseLeftButtonDown += OnWindowMouseLeftButtonDown;
+        PreviewKeyDown += OnPreviewKeyDown;
+    }
+
+    private void OnPreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        // Ctrl+Shift+R force-refreshes the camera feed.
+        if (e.Key == Key.R && Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Shift))
+        {
+            e.Handled = true;
+            Refresh();
+        }
+    }
+
+    /// <summary>Tears down the current capture and starts a fresh one.</summary>
+    public void Refresh()
+    {
+        var old = _capture;
+        _capture = new WebcamCapture();
+        old.Dispose();
+        _ = StartAsync();
     }
 
     private void OnWindowMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -46,7 +66,14 @@ public partial class MirrorWindow : Window
 
     private async Task StartAsync()
     {
-        _capture.FrameReady += bmp =>
+        // Reset the overlay state so a refresh re-shows "Starting…" and re-fits.
+        _sizedToFrame = false;
+        StatusText.Text = "Starting camera…";
+        StatusText.Visibility = Visibility.Visible;
+        DiagText.Visibility = Visibility.Collapsed;
+
+        var capture = _capture;
+        capture.FrameReady += bmp =>
         {
             PreviewBrush.ImageSource = bmp;
             if (StatusText.Visibility != Visibility.Collapsed)
@@ -58,12 +85,12 @@ public partial class MirrorWindow : Window
                 PositionAtTopCenter();
             }
         };
-        _capture.DiagnosticsReady += info =>
+        capture.DiagnosticsReady += info =>
         {
             DiagText.Text = info;
             DiagText.Visibility = Visibility.Visible;
         };
-        _capture.CaptureFailed += message =>
+        capture.CaptureFailed += message =>
         {
             var text = "Camera error: " + message +
                 "\nTry another camera from the tray icon's Camera menu.";
@@ -74,7 +101,7 @@ public partial class MirrorWindow : Window
         };
         try
         {
-            await _capture.StartAsync(Dispatcher, Settings.CameraId);
+            await capture.StartAsync(Dispatcher, Settings.CameraId);
         }
         catch (Exception ex)
         {

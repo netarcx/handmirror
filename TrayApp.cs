@@ -40,6 +40,7 @@ public sealed class TrayApp : IDisposable
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("Show / Hide", null, (_, _) => Toggle());
+        menu.Items.Add("Refresh (Ctrl+Shift+R)", null, (_, _) => RefreshCamera());
         menu.Items.Add(_cameraMenu);
         menu.Items.Add(startupItem);
         menu.Items.Add(new ToolStripSeparator());
@@ -195,11 +196,14 @@ public sealed class TrayApp : IDisposable
         Settings.CameraId = id;
 
         // Restart the preview with the newly chosen camera if it's open.
-        if (_window != null)
-        {
-            _window.Close();
-            Toggle();
-        }
+        _window?.Refresh();
+    }
+
+    // Refresh the open preview, or open it if it's hidden.
+    private void RefreshCamera()
+    {
+        if (_window != null) _window.Refresh();
+        else Toggle();
     }
 
     private void Toggle()
