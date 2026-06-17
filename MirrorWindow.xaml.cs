@@ -69,10 +69,24 @@ public partial class MirrorWindow : Window
 
     private void OnWindowMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
-        if (e.OriginalSource is DependencyObject src && IsDescendantOf(src, CloseButton))
+        if (e.OriginalSource is DependencyObject src
+            && (IsDescendantOf(src, CloseButton) || IsDescendantOf(src, ResizeGrip)))
             return;
         if (e.LeftButton == MouseButtonState.Pressed)
             DragMove();
+    }
+
+    // Drag the bottom-right grip to resize, keeping the camera's aspect ratio so the
+    // image never distorts. Anchored at the top-left so the grip follows the cursor.
+    private void ResizeGrip_DragDelta(object sender, System.Windows.Controls.Primitives.DragDeltaEventArgs e)
+    {
+        var area = SystemParameters.WorkArea;
+        double maxByHeight = _aspect > 0 ? (area.Height - 24) / _aspect : area.Width;
+        double maxWidth = Math.Min(area.Width, maxByHeight);
+
+        double newWidth = Math.Max(240, Math.Min(maxWidth, Width + e.HorizontalChange));
+        Width = newWidth;
+        Height = newWidth * _aspect;
     }
 
     private static bool IsDescendantOf(DependencyObject? node, DependencyObject ancestor)
