@@ -125,33 +125,20 @@ public sealed class WebcamCapture : IDisposable
                ?? pool.FirstOrDefault();
     }
 
-    // Create a frame reader, trying several output subtypes. Forcing BGRA8 directly
-    // fails on many cameras and on MJPG-only capture cards (MF_E_INVALIDMEDIATYPE).
-    // We prefer BGRA8 (MF does the full color conversion) then 4:2:2 YUY2, and only
-    // fall back to 4:2:0 NV12 last — NV12's vertically-subsampled chroma is what
-    // produces the green/magenta luma-chroma split on some hardware.
+    // Create a frame reader, preferring BGRA8 output so MediaFoundation's (correct)
+    // color converter does the YUV->RGB work. We deliberately do NOT take YUY2 or the
+    // native YUV frame and convert it ourselves: SoftwareBitmap.Convert mishandles
+    // YUY2 (green/magenta duotone) on some hardware. NV12 via MF is the fallback;
+    // native is last (and only yields a SoftwareBitmap for already-RGB sources).
     private async Task<MediaFrameReader?> CreateReaderAsync(MediaCapture capture, MediaFrameSource source)
     {
-        var current = source.CurrentFormat;
-        bool nativeUsable = current != null
-            && UncompressedSubtypes.Contains(current.Subtype.ToUpperInvariant());
-
         // (label, subtype) pairs; null subtype = the source's native format.
-        var strategies = nativeUsable
-            ? new (string Label, string? Subtype)[]
-              {
-                  ("native", null),
-                  ("Bgra8", MediaEncodingSubtypes.Bgra8),
-                  ("Yuy2", MediaEncodingSubtypes.Yuy2),
-                  ("Nv12", MediaEncodingSubtypes.Nv12),
-              }
-            : new (string Label, string? Subtype)[]
-              {
-                  ("Bgra8", MediaEncodingSubtypes.Bgra8),
-                  ("Yuy2", MediaEncodingSubtypes.Yuy2),
-                  ("Nv12", MediaEncodingSubtypes.Nv12),
-                  ("native", null),
-              };
+        var strategies = new (string Label, string? Subtype)[]
+        {
+            ("Bgra8", MediaEncodingSubtypes.Bgra8),
+            ("Nv12", MediaEncodingSubtypes.Nv12),
+            ("native", null),
+        };
 
         foreach (var (label, subtype) in strategies)
         {
@@ -191,17 +178,33 @@ public sealed class WebcamCapture : IDisposable
 
     private static MediaFrameFormat? PickFormat(MediaFrameSource source)
     {
-        const long target = 1280L * 720; // aim for ~720p
+        const long maxArea = 1920L * 1080; // don't pick a laggy 4K mode
 
-        return source.SupportedFormats
-            .Where(f => string.Equals(f.MajorType, "Video", StringComparison.OrdinalIgnoreCase)
-                        && UncompressedSubtypes.Contains(f.Subtype.ToUpperInvariant()))
-            .OrderBy(f => SubtypeRank(f.Subtype))                                  // color fidelity first
-            .ThenBy(f => Math.Abs((long)f.VideoFormat.Width * f.VideoFormat.Height - target))
-            .ThenByDescending(f => f.FrameRate.Denominator == 0
-                ? 0d
-                : f.FrameRate.Numerator / (double)f.FrameRate.Denominator)
-            .FirstOrDefault();
+        // MJPG/MJPEG are allowed here because the reader decodes them to BGRA8 for us;
+        // they're often the only modes that expose the camera's full field of view
+        // (lower uncompressed modes are frequently a cropped sensor readout).
+        static bool Acceptable(MediaFrameFormat f)
+        {
+            if (!string.Equals(f.MajorType, "Video", StringComparison.OrdinalIgnoreCase)) return false;
+            var s = f.Subtype.ToUpperInvariant();
+            return UncompressedSubtypes.Contains(s) || s is "MJPG" or "MJPEG";
+        }
+
+        static long Area(MediaFrameFormat f) => (long)f.VideoFormat.Width * f.VideoFormat.Height;
+        static double Fps(MediaFrameFormat f) =>
+            f.FrameRate.Denominator == 0 ? 0d : f.FrameRate.Numerator / (double)f.FrameRate.Denominator;
+
+        var candidates = source.SupportedFormats.Where(Acceptable).ToList();
+
+        // Largest frame up to 1080p (full field of view) at a usable frame rate;
+        // tie-break toward higher color fidelity, then higher fps.
+        return candidates
+            .Where(f => Area(f) <= maxArea && Fps(f) >= 15)
+            .OrderByDescending(Area)
+            .ThenBy(f => SubtypeRank(f.Subtype))
+            .ThenByDescending(Fps)
+            .FirstOrDefault()
+            ?? candidates.OrderByDescending(Area).FirstOrDefault();
     }
 
     private void OnFrameArrived(MediaFrameReader sender, MediaFrameArrivedEventArgs args)
