@@ -36,11 +36,11 @@ public sealed class TrayApp : IDisposable
         };
 
         _cameraMenu = new ToolStripMenuItem("Camera");
-        _updateItem = new ToolStripMenuItem("Check for updates…", null, (_, _) => OnUpdateItemClicked());
+        _updateItem = new ToolStripMenuItem("Check for updates (Ctrl+Shift+R)", null, (_, _) => OnUpdateItemClicked());
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("Show / Hide", null, (_, _) => Toggle());
-        menu.Items.Add("Refresh (Ctrl+Shift+R)", null, (_, _) => RefreshCamera());
+        menu.Items.Add("Refresh camera", null, (_, _) => RefreshCamera());
         menu.Items.Add(_cameraMenu);
         menu.Items.Add(startupItem);
         menu.Items.Add(new ToolStripSeparator());
@@ -90,7 +90,7 @@ public sealed class TrayApp : IDisposable
             if (info == null)
             {
                 _pendingUpdate = null;
-                _updateItem.Text = "Check for updates…";
+                _updateItem.Text = "Check for updates (Ctrl+Shift+R)";
                 return;
             }
 
@@ -134,6 +134,24 @@ public sealed class TrayApp : IDisposable
         {
             _updateItem.Enabled = true;
         }
+    }
+
+    // Ctrl+Shift+R from the mirror window: check for a new version (and install it if
+    // one is pending), with balloon feedback since the menu text isn't visible.
+    private async void CheckForUpdatesFromHotkey()
+    {
+        if (_installing) return;
+
+        if (_pendingUpdate != null)
+        {
+            await InstallUpdateAsync(_pendingUpdate);
+            return;
+        }
+
+        await CheckForUpdatesAsync(announce: true);
+        if (_pendingUpdate == null)
+            _icon.ShowBalloonTip(4000, "Hand Mirror",
+                $"You're up to date (v{UpdateService.CurrentVersion}).", ToolTipIcon.Info);
     }
 
     private async Task InstallUpdateAsync(UpdateService.UpdateInfo info)
@@ -250,6 +268,7 @@ public sealed class TrayApp : IDisposable
         }
 
         var w = new MirrorWindow();
+        w.UpdateCheckRequested = CheckForUpdatesFromHotkey;
         w.Closed += (_, _) => { if (ReferenceEquals(_window, w)) _window = null; };
         _window = w;
         w.Show();

@@ -45,13 +45,16 @@ public partial class MirrorWindow : Window
         e.Handled = true;
     }
 
+    /// <summary>Raised when the user presses Ctrl+Shift+R to check for a new version.</summary>
+    public Action? UpdateCheckRequested;
+
     private void OnPreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
-        // Ctrl+Shift+R force-refreshes the camera feed.
+        // Ctrl+Shift+R checks for a new app version (like a browser hard-refresh).
         if (e.Key == Key.R && Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Shift))
         {
             e.Handled = true;
-            Refresh();
+            UpdateCheckRequested?.Invoke();
         }
     }
 
