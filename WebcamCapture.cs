@@ -25,11 +25,6 @@ public sealed class WebcamCapture : IDisposable
 
     public event Action<WriteableBitmap>? FrameReady;
     public event Action<string>? CaptureFailed;
-    public event Action<string>? DiagnosticsReady;
-
-    private string _negotiatedSubtype = "native";
-    private string _sourceSubtype = "?";
-    private int _diagSent;
 
     public sealed record CameraInfo(string Id, string Name);
 
@@ -103,7 +98,6 @@ public sealed class WebcamCapture : IDisposable
             reader.Dispose();
             return;
         }
-        _sourceSubtype = source.CurrentFormat?.Subtype ?? "?";
         _reader = reader;
         _reader.FrameArrived += OnFrameArrived;
         var status = await _reader.StartAsync();
@@ -132,23 +126,21 @@ public sealed class WebcamCapture : IDisposable
     // native is last (and only yields a SoftwareBitmap for already-RGB sources).
     private async Task<MediaFrameReader?> CreateReaderAsync(MediaCapture capture, MediaFrameSource source)
     {
-        // (label, subtype) pairs; null subtype = the source's native format.
-        var strategies = new (string Label, string? Subtype)[]
+        // null subtype = the source's native format.
+        var subtypes = new string?[]
         {
-            ("Bgra8", MediaEncodingSubtypes.Bgra8),
-            ("Nv12", MediaEncodingSubtypes.Nv12),
-            ("native", null),
+            MediaEncodingSubtypes.Bgra8,
+            MediaEncodingSubtypes.Nv12,
+            null,
         };
 
-        foreach (var (label, subtype) in strategies)
+        foreach (var subtype in subtypes)
         {
             try
             {
-                var reader = subtype == null
+                return subtype == null
                     ? await capture.CreateFrameReaderAsync(source)
                     : await capture.CreateFrameReaderAsync(source, subtype);
-                _negotiatedSubtype = label;
-                return reader;
             }
             catch
             {
@@ -222,7 +214,6 @@ public sealed class WebcamCapture : IDisposable
             var bitmap = frameRef?.VideoMediaFrame?.SoftwareBitmap;
             if (bitmap == null) return;
 
-            var incomingFormat = bitmap.BitmapPixelFormat;
             var converted = bitmap;
             var ownsConverted = false;
             if (bitmap.BitmapPixelFormat != BitmapPixelFormat.Bgra8 ||
@@ -269,14 +260,6 @@ public sealed class WebcamCapture : IDisposable
             var bytes = _scratch;
             var dispatcher = _dispatcher;
             if (dispatcher == null) return;
-
-            // One-shot diagnostic so we can see the actual negotiated format on screen.
-            if (Interlocked.Exchange(ref _diagSent, 1) == 0)
-            {
-                var diag = $"reader={_negotiatedSubtype}  src={_sourceSubtype}  " +
-                           $"in={incomingFormat}  {w}x{h}  stride={stride}";
-                dispatcher.BeginInvoke(() => DiagnosticsReady?.Invoke(diag));
-            }
 
             dispatcher.BeginInvoke(() =>
             {
@@ -342,6 +325,5 @@ public sealed class WebcamCapture : IDisposable
         _dispatcher = null;
         FrameReady = null;
         CaptureFailed = null;
-        DiagnosticsReady = null;
     }
 }

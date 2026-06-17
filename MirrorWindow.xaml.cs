@@ -8,16 +8,35 @@ namespace HandMirror;
 
 public partial class MirrorWindow : Window
 {
+    private const double DefaultWidth = 640;
     private WebcamCapture _capture = new();
     private bool _sizedToFrame;
+    private double _aspect = 480.0 / 640.0; // updated from the first frame
 
     public MirrorWindow()
     {
         InitializeComponent();
+        Width = DefaultWidth; // always open at the default size (never persisted)
         PositionAtTopCenter();
         Loaded += async (_, _) => await StartAsync();
         MouseLeftButtonDown += OnWindowMouseLeftButtonDown;
         PreviewKeyDown += OnPreviewKeyDown;
+        MouseWheel += OnMouseWheel;
+    }
+
+    // Scroll the wheel over the window to scale it up/down (aspect-locked). The size
+    // isn't saved, so each time the window is opened it returns to the default size.
+    private void OnMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
+    {
+        const double step = 80;
+        double maxWidth = SystemParameters.WorkArea.Width;
+        double newWidth = Width + (e.Delta > 0 ? step : -step);
+        newWidth = Math.Max(240, Math.Min(maxWidth, newWidth));
+
+        Width = newWidth;
+        Height = newWidth * _aspect;
+        PositionAtTopCenter();
+        e.Handled = true;
     }
 
     private void OnPreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
@@ -66,11 +85,10 @@ public partial class MirrorWindow : Window
 
     private async Task StartAsync()
     {
-        // Reset the overlay state so a refresh re-shows "Starting…" and re-fits.
+        // Reset state so a refresh re-shows "Starting…" and re-fits to the frame.
         _sizedToFrame = false;
         StatusText.Text = "Starting camera…";
         StatusText.Visibility = Visibility.Visible;
-        DiagText.Visibility = Visibility.Collapsed;
 
         var capture = _capture;
         capture.FrameReady += bmp =>
@@ -78,17 +96,16 @@ public partial class MirrorWindow : Window
             PreviewBrush.ImageSource = bmp;
             if (StatusText.Visibility != Visibility.Collapsed)
                 StatusText.Visibility = Visibility.Collapsed;
-            if (!_sizedToFrame && bmp.PixelWidth > 0)
+            if (bmp.PixelWidth > 0)
             {
-                _sizedToFrame = true;
-                Height = Width * ((double)bmp.PixelHeight / bmp.PixelWidth);
-                PositionAtTopCenter();
+                _aspect = (double)bmp.PixelHeight / bmp.PixelWidth;
+                if (!_sizedToFrame)
+                {
+                    _sizedToFrame = true;
+                    Height = Width * _aspect;
+                    PositionAtTopCenter();
+                }
             }
-        };
-        capture.DiagnosticsReady += info =>
-        {
-            DiagText.Text = info;
-            DiagText.Visibility = Visibility.Visible;
         };
         capture.CaptureFailed += message =>
         {
