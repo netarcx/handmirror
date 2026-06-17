@@ -29,7 +29,13 @@ public partial class MirrorWindow : Window
     private void OnMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
     {
         const double step = 80;
-        double maxWidth = SystemParameters.WorkArea.Width;
+        var area = SystemParameters.WorkArea;
+
+        // Cap width by both the screen width and the screen height (via aspect), so a
+        // portrait source can't grow the window taller than the display.
+        double maxByHeight = _aspect > 0 ? (area.Height - 24) / _aspect : area.Width;
+        double maxWidth = Math.Min(area.Width, maxByHeight);
+
         double newWidth = Width + (e.Delta > 0 ? step : -step);
         newWidth = Math.Max(240, Math.Min(maxWidth, newWidth));
 

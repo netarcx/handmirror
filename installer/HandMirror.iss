@@ -55,7 +55,8 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 ; During a silent auto-update the postinstall entry is skipped, so relaunch here.
-Filename: "{app}\{#MyAppExeName}"; Flags: nowait; Check: WizardSilent
+; --updated tells the app the old instance may still be exiting (mutex handoff).
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--updated"; Flags: nowait; Check: WizardSilent
 
 [UninstallRun]
 ; Best-effort: stop any running instance before uninstall
@@ -70,6 +71,10 @@ var
 begin
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#MyAppExeName}', '',
     SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // taskkill returns as soon as it signals termination; give the OS a brief,
+  // bounded window to actually tear the process down and release the exe's file
+  // handle before we overwrite it (otherwise a silent update can fail with no UI).
+  Sleep(1500);
   Result := '';
 end;
 

@@ -1,3 +1,5 @@
+using System;
+using System.Linq;
 using System.Threading;
 
 namespace HandMirror;
@@ -13,8 +15,13 @@ public partial class App : System.Windows.Application
     {
         base.OnStartup(e);
 
+        // The installer relaunches us with --updated after a silent auto-update. In
+        // that case the previous process may not have fully exited yet, so wait for it
+        // to release the single-instance mutex instead of giving up immediately.
+        bool afterUpdate = e.Args.Contains("--updated");
+
         _singleInstance = new Mutex(initiallyOwned: true, SingleInstanceMutexName, out var createdNew);
-        if (!createdNew)
+        if (!createdNew && !(afterUpdate && WaitForPreviousInstance(_singleInstance)))
         {
             _singleInstance.Dispose();
             _singleInstance = null;
@@ -23,6 +30,25 @@ public partial class App : System.Windows.Application
         }
 
         _tray = new TrayApp();
+    }
+
+    private static bool WaitForPreviousInstance(Mutex mutex)
+    {
+        try
+        {
+            // Old instance exits quickly (background teardown); cap the wait anyway.
+            return mutex.WaitOne(TimeSpan.FromSeconds(10));
+        }
+        catch (AbandonedMutexException)
+        {
+            // Previous instance was force-killed (by the installer) without releasing
+            // the mutex — ownership has transferred to us, which is what we want.
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     protected override void OnExit(System.Windows.ExitEventArgs e)

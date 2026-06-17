@@ -261,7 +261,7 @@ public sealed class WebcamCapture : IDisposable
             var dispatcher = _dispatcher;
             if (dispatcher == null) return;
 
-            dispatcher.BeginInvoke(() =>
+            var op = dispatcher.BeginInvoke(() =>
             {
                 try
                 {
@@ -279,6 +279,9 @@ public sealed class WebcamCapture : IDisposable
                     Interlocked.Exchange(ref _updatePending, 0);
                 }
             });
+            // If the dispatcher shuts down, the queued op may be aborted without its
+            // finally running — release the gate so the pipeline can't wedge.
+            op.Aborted += (_, _) => Interlocked.Exchange(ref _updatePending, 0);
             dispatched = true;
         }
         catch (Exception ex)
@@ -305,20 +308,19 @@ public sealed class WebcamCapture : IDisposable
         _reader = null;
         _capture = null;
 
-        try
+        if (reader != null)
+            reader.FrameArrived -= OnFrameArrived;
+
+        // Tear down off the UI thread so a slow/hung StopAsync never freezes the UI
+        // (Dispose is called from close, Refresh, and camera-switch). Sequenced so the
+        // reader is stopped before it's disposed. If the process is exiting, the OS
+        // releases the camera handle regardless.
+        Task.Run(async () =>
         {
-            if (reader != null)
-            {
-                reader.FrameArrived -= OnFrameArrived;
-                // Stop on a thread-pool thread (no UI SynchronizationContext) so the
-                // StopAsync continuation can't deadlock against the UI thread we're on.
-                // Bounded wait so the camera/LED is released before we tear down.
-                Task.Run(async () => await reader.StopAsync()).Wait(TimeSpan.FromSeconds(2));
-                reader.Dispose();
-            }
-        }
-        catch { }
-        try { capture?.Dispose(); } catch { }
+            try { if (reader != null) await reader.StopAsync(); } catch { }
+            try { reader?.Dispose(); } catch { }
+            try { capture?.Dispose(); } catch { }
+        });
 
         _scratch = null;
         _bitmap = null;

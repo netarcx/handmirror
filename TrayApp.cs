@@ -10,7 +10,7 @@ public sealed class TrayApp : IDisposable
     private readonly NotifyIcon _icon;
     private readonly ToolStripMenuItem _cameraMenu;
     private readonly ToolStripMenuItem _updateItem;
-    private readonly System.Windows.Forms.Timer _updateTimer;
+    private readonly System.Windows.Threading.DispatcherTimer _updateTimer;
     private MirrorWindow? _window;
     private string _cameraMenuSignature = "";
     private UpdateService.UpdateInfo? _pendingUpdate;
@@ -69,9 +69,12 @@ public sealed class TrayApp : IDisposable
 
         _ = PopulateCamerasAsync();
 
-        // Check for updates on launch, then on a recurring timer. The timer ticks on
-        // the UI thread, so the async continuations are UI-thread safe.
-        _updateTimer = new System.Windows.Forms.Timer { Interval = 30 * 60 * 1000 };
+        // Check for updates on launch, then on a recurring timer. DispatcherTimer
+        // ticks on the WPF UI thread, so the async continuations are UI-thread safe.
+        _updateTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromMinutes(30),
+        };
         _updateTimer.Tick += (_, _) => _ = CheckForUpdatesAsync(announce: true);
         _updateTimer.Start();
         _ = CheckForUpdatesAsync(announce: true);
@@ -81,24 +84,31 @@ public sealed class TrayApp : IDisposable
     {
         if (_installing) return;
 
-        var info = await UpdateService.CheckAsync();
-        if (info == null)
+        try
         {
-            _pendingUpdate = null;
-            _updateItem.Text = "Check for updates…";
-            return;
+            var info = await UpdateService.CheckAsync();
+            if (info == null)
+            {
+                _pendingUpdate = null;
+                _updateItem.Text = "Check for updates…";
+                return;
+            }
+
+            _pendingUpdate = info;
+            _updateItem.Text = $"Install update {info.Version}…";
+
+            // Only pop the balloon once per discovered version, so the recurring check
+            // doesn't nag every 30 minutes.
+            if (announce && info.Version != _notifiedVersion)
+            {
+                _notifiedVersion = info.Version;
+                _icon.ShowBalloonTip(7000, "Hand Mirror update available",
+                    $"Version {info.Version} is ready. Click here to install.", ToolTipIcon.Info);
+            }
         }
-
-        _pendingUpdate = info;
-        _updateItem.Text = $"Install update {info.Version}…";
-
-        // Only pop the balloon once per discovered version, so the recurring check
-        // doesn't nag every 30 minutes.
-        if (announce && info.Version != _notifiedVersion)
+        catch
         {
-            _notifiedVersion = info.Version;
-            _icon.ShowBalloonTip(7000, "Hand Mirror update available",
-                $"Version {info.Version} is ready. Click here to install.", ToolTipIcon.Info);
+            // Never let an update check take down the tray app.
         }
     }
 
@@ -114,10 +124,16 @@ public sealed class TrayApp : IDisposable
 
         _updateItem.Text = "Checking…";
         _updateItem.Enabled = false;
-        await CheckForUpdatesAsync(announce: false);
-        _updateItem.Enabled = true;
-        if (_pendingUpdate == null)
-            _updateItem.Text = $"Up to date ({UpdateService.CurrentVersion})";
+        try
+        {
+            await CheckForUpdatesAsync(announce: false);
+            if (_pendingUpdate == null)
+                _updateItem.Text = $"Up to date ({UpdateService.CurrentVersion})";
+        }
+        finally
+        {
+            _updateItem.Enabled = true;
+        }
     }
 
     private async Task InstallUpdateAsync(UpdateService.UpdateInfo info)
@@ -142,8 +158,19 @@ public sealed class TrayApp : IDisposable
             return;
         }
 
-        // Runs the silent installer and shuts us down; the installer relaunches us.
-        UpdateService.ApplyAndRestart(installerPath);
+        try
+        {
+            // Runs the silent installer and shuts us down; the installer relaunches us.
+            UpdateService.ApplyAndRestart(installerPath);
+        }
+        catch (Exception ex)
+        {
+            _installing = false;
+            _updateItem.Enabled = true;
+            _updateItem.Text = $"Install update {info.Version}…";
+            _icon.ShowBalloonTip(7000, "Update failed",
+                "Could not start the installer: " + ex.Message, ToolTipIcon.Error);
+        }
     }
 
     private async Task PopulateCamerasAsync()
@@ -183,11 +210,18 @@ public sealed class TrayApp : IDisposable
 
         // The tray menu has WPF-UI-thread affinity; marshal the rebuild there in case
         // the WinRT await resumed on a thread-pool thread.
-        var dispatcher = WpfApp.Current?.Dispatcher;
-        if (dispatcher != null && !dispatcher.CheckAccess())
-            dispatcher.Invoke(Rebuild);
-        else
-            Rebuild();
+        try
+        {
+            var dispatcher = WpfApp.Current?.Dispatcher;
+            if (dispatcher != null && !dispatcher.CheckAccess())
+                dispatcher.Invoke(Rebuild);
+            else
+                Rebuild();
+        }
+        catch
+        {
+            // Don't let a menu rebuild failure crash the tray.
+        }
     }
 
     private void SelectCamera(string id)
@@ -232,7 +266,6 @@ public sealed class TrayApp : IDisposable
     public void Dispose()
     {
         _updateTimer.Stop();
-        _updateTimer.Dispose();
         _icon.Visible = false;
         _icon.Dispose();
         _window?.Close();
