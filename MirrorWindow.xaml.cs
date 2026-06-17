@@ -20,7 +20,7 @@ public partial class MirrorWindow : Window
         PreviewKeyDown += OnPreviewKeyDown;
     }
 
-    private void OnPreviewKeyDown(object sender, KeyEventArgs e)
+    private void OnPreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
         // Ctrl+Shift+R force-refreshes the camera feed.
         if (e.Key == Key.R && Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Shift))
