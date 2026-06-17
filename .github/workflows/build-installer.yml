@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write   # needed to create the GitHub Release and attach the installer
 
+env:
+  # Run the JS-based actions (checkout, setup-dotnet, upload-artifact,
+  # action-gh-release) on Node 24 instead of the deprecated Node 20.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 jobs:
   build:
     runs-on: windows-latest
